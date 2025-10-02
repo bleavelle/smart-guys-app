@@ -26,6 +26,9 @@ class FrequencyDiscoverer:
         self.complex_peaks = []
         self.phase_velocity = None  # Phase space velocity (frequency)
         self.phase_confirmations = {}  # Phase space mappings (buckets -> values)
+        self.hallucination_count = 0  # Track catastrophic events
+        self.all_guesses = []  # Store ALL frequency guesses for visualization
+        self.catastrophic_events = []  # Track sign-flip hallucinations
 
     def observe(self, value, complex_mode=False):
         """Try to discover frequency from observations"""
@@ -43,6 +46,18 @@ class FrequencyDiscoverer:
         if self.discovered_freq:
             return
 
+        # CATASTROPHIC HALLUCINATION CHECK - 5% chance of sign flip!
+        if np.random.random() < 0.05:
+            actual_value = value
+            value = -value  # SIGN FLIP - seeing the exact opposite!
+            self.hallucination_count += 1
+            self.catastrophic_events.append({
+                'step': len(self.phase_samples),
+                'actual': actual_value,
+                'hallucinated': value,
+                'error': value - actual_value
+            })
+
         self.phase_samples.append(value)
 
         # Detect peaks
@@ -58,12 +73,25 @@ class FrequencyDiscoverer:
                     interval = self.peaks[-1] - self.peaks[-2]
                     # Add discovery noise
                     noise = np.random.uniform(-0.01, 0.01)  # ±1% error
-                    self.discovered_freq = (1.0 / interval) * (1 + noise) * 1000  # Convert to Hz
-                    self.discovery_error = abs(noise * 100)
-                    self.phase_velocity = self.discovered_freq  # Store as phase velocity
+                    freq_guess = (1.0 / interval) * (1 + noise) * 1000  # Convert to Hz
 
-                    # Estimate amplitude from peak
-                    self.amplitude = abs(self.phase_samples[-2])
+                    # Store ALL guesses for visualization
+                    self.all_guesses.append({
+                        'frequency': freq_guess,
+                        'peak_idx': len(self.peaks),
+                        'interval': interval,
+                        'amplitude': abs(self.phase_samples[-2]),
+                        'hallucinating': self.hallucination_count > 0
+                    })
+
+                    # Only set discovered frequency if not already set
+                    if not self.discovered_freq:
+                        self.discovered_freq = freq_guess
+                        self.discovery_error = abs(noise * 100)
+                        self.phase_velocity = self.discovered_freq  # Store as phase velocity
+
+                        # Estimate amplitude from peak
+                        self.amplitude = abs(self.phase_samples[-2])
 
                     # Store phase confirmations (phase space mappings)
                     if len(self.phase_samples) > 1:
@@ -355,8 +383,8 @@ if st.session_state.running and st.session_state.current_freq_idx < len(st.sessi
         actual_error = abs(winner.discovered_freq - current_freq) / current_freq * 100
         st.success(f"🏆 {winner.name} WINS! Discovered {winner.discovered_freq:.2f} Hz (actual error: {actual_error:.2f}%)")
 
-        # Competition chart
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4), facecolor='#1a1a2e')
+        # Competition chart with ALL GUESSES visualization
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 8), facecolor='#1a1a2e')
 
         # Discovery errors
         ax1.set_title('Competition Results', color='white')
@@ -418,6 +446,77 @@ if st.session_state.running and st.session_state.current_freq_idx < len(st.sessi
             spine.set_color('white')
         ax2.grid(True, alpha=0.3)
         ax2.set_aspect('equal', adjustable='box')
+
+        # 3. ALL FREQUENCY GUESSES ON SINE WAVE
+        ax3.set_title('All Frequency Guesses Mapped to Wave', color='white')
+        ax3.set_facecolor('#16213e')
+
+        # Collect ALL guesses from ALL discoverers
+        all_guesses_combined = []
+        for d in discovered:
+            for guess in d.all_guesses:
+                all_guesses_combined.append({
+                    'name': d.name,
+                    'color': d.color,
+                    'frequency': guess['frequency'],
+                    'hallucinating': guess.get('hallucinating', False)
+                })
+
+        # Generate reference sine wave
+        t_ref = np.linspace(0, 200, 500)
+        ref_signal = current_amp * np.sin(2 * np.pi * current_freq * t_ref / 1000)
+        ax3.plot(t_ref, ref_signal, 'w-', alpha=0.3, linewidth=1, label=f'True: {current_freq} Hz')
+
+        # Plot each guess as a point on the sine wave
+        if all_guesses_combined:
+            for i, guess in enumerate(all_guesses_combined):
+                # Calculate where this frequency would be on the wave
+                freq_ratio = guess['frequency'] / current_freq
+                # Map to a position on the wave
+                t_position = (i * 20) % 200  # Spread guesses along time axis
+                y_position = current_amp * np.sin(2 * np.pi * guess['frequency'] * t_position / 1000)
+
+                marker = 'x' if guess['hallucinating'] else 'o'
+                alpha = 0.9 if abs(guess['frequency'] - current_freq) < 2 else 0.4
+
+                ax3.scatter(t_position, y_position, color=guess['color'],
+                          marker=marker, s=50, alpha=alpha)
+
+        ax3.axhline(0, color='gray', linestyle='-', alpha=0.3)
+        ax3.set_xlabel('Time (ms)', color='white')
+        ax3.set_ylabel('Amplitude', color='white')
+        ax3.tick_params(colors='white')
+        for spine in ax3.spines.values():
+            spine.set_color('white')
+        ax3.grid(True, alpha=0.3)
+
+        # 4. CATASTROPHIC HALLUCINATIONS
+        ax4.set_title('Catastrophic Events', color='white')
+        ax4.set_facecolor('#16213e')
+
+        # Count total hallucinations across all discoverers
+        total_hallucinations = sum(d.hallucination_count for d in discovered)
+        total_events = []
+        for d in discovered:
+            total_events.extend([(e, d.color, d.name) for e in d.catastrophic_events])
+
+        if total_events:
+            ax4.text(0.5, 0.8, f'💀 SIGN-FLIP HALLUCINATIONS: {total_hallucinations}',
+                    transform=ax4.transAxes, ha='center', fontsize=14, color='red', fontweight='bold')
+
+            # Show some examples
+            for i, (event, color, name) in enumerate(total_events[:5]):
+                y_pos = 0.6 - i*0.1
+                ax4.text(0.5, y_pos,
+                        f"{name}: Saw {event['hallucinated']:.1f} instead of {event['actual']:.1f}",
+                        transform=ax4.transAxes, ha='center', fontsize=10, color=color)
+        else:
+            ax4.text(0.5, 0.5, '✅ No Catastrophic Hallucinations!',
+                    transform=ax4.transAxes, ha='center', fontsize=14, color='green')
+
+        ax4.set_xlim(0, 1)
+        ax4.set_ylim(0, 1)
+        ax4.axis('off')
 
         plt.tight_layout()
         st.pyplot(fig)
